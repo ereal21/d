@@ -13,13 +13,13 @@ from aiogram import Dispatcher
 from aiogram.types import Message, CallbackQuery, ChatType, InlineKeyboardMarkup, InlineKeyboardButton
 
 from bot.database.methods import (
-    select_max_role_id, create_user, check_role, check_user,
+    get_role_id_by_name, create_user, check_role, check_user,
     get_all_categories, get_all_items, select_bought_items, get_bought_item_info, get_item_info,
     select_item_values_amount, get_user_balance, get_item_value, buy_item, add_bought_item, buy_item_for_balance,
     select_user_operations, select_user_items, start_operation,
     select_unfinished_operations, get_user_referral, finish_operation, update_balance, create_operation,
     bought_items_list, check_value, get_subcategories, get_category_parent, get_user_language, update_user_language,
-    get_unfinished_operation, get_promocode
+    get_unfinished_operation, get_promocode, set_role
 )
 from bot.handlers.other import get_bot_user_ids, get_bot_info
 from bot.keyboards import (
@@ -33,20 +33,16 @@ from bot.misc.payment import quick_pay, check_payment_status
 from bot.misc.nowpayments import create_payment, check_payment
 from bot.utils import display_name
 from bot.utils.notifications import notify_owner_of_purchase
-from bot.utils.level import get_level_info
 from bot.utils.files import cleanup_item_file
 
 
 def build_menu_text(user_obj, balance: float, purchases: int, lang: str) -> str:
-    """Return main menu text with loyalty status."""
+    """Return the formatted main menu text."""
     mention = f"<a href='tg://user?id={user_obj.id}'>{html.escape(user_obj.full_name)}</a>"
-    level_name, _, progress_bar, battery = get_level_info(purchases)
-    status = f"👤 Status: {level_name} [{progress_bar}] {battery}"
     return (
         f"{t(lang, 'hello', user=mention)}\n"
         f"{t(lang, 'balance', balance=f'{balance:.2f}')}\n"
-        f"{t(lang, 'total_purchases', count=purchases)}\n"
-        f"{status}\n\n"
+        f"{t(lang, 'total_purchases', count=purchases)}\n\n"
         f"{t(lang, 'note')}"
     )
 
@@ -71,15 +67,20 @@ async def start(message: Message):
 
     TgConfig.STATE[user_id] = None
 
-    owner = select_max_role_id()
+    owner_role_id = get_role_id_by_name('OWNER')
+    owner_id = EnvKeys.OWNER_ID
+    is_owner = bool(owner_id) and str(user_id) == owner_id
     current_time = datetime.datetime.now()
     formatted_time = current_time.strftime("%Y-%m-%d %H:%M:%S")
     referral_id = message.text[7:] if message.text[7:] != str(user_id) else None
-    user_role = owner if str(user_id) == EnvKeys.OWNER_ID else 1
+    user_role = owner_role_id if is_owner and owner_role_id else 1
     create_user(telegram_id=user_id, registration_date=formatted_time, referral_id=referral_id, role=user_role,
                 username=message.from_user.username)
-    role_data = check_role(user_id)
     user_db = check_user(user_id)
+    if is_owner and owner_role_id and user_db and user_db.role_id != owner_role_id:
+        set_role(user_id, owner_role_id)
+        user_db = check_user(user_id)
+    role_data = check_role(user_id)
 
 
     user_lang = user_db.language
@@ -251,9 +252,7 @@ async def item_info_callback_handler(call: CallbackQuery):
     item_info_list = get_item_info(item_name)
     category = item_info_list['category_name']
     lang = get_user_language(user_id) or 'en'
-    purchases = select_user_items(user_id)
-    _, discount, _, _ = get_level_info(purchases)
-    price = round(item_info_list["price"] * (100 - discount) / 100, 2)
+    price = round(item_info_list["price"], 2)
     markup = item_info(item_name, category, lang)
     await bot.edit_message_text(
         f'🏪 Item {display_name(item_name)}\n'
@@ -280,9 +279,7 @@ async def confirm_buy_callback_handler(call: CallbackQuery):
     if not info:
         await call.answer('❌ Item not found', show_alert=True)
         return
-    purchases = select_user_items(user_id)
-    _, discount, _, _ = get_level_info(purchases)
-    price = round(info['price'] * (100 - discount) / 100, 2)
+    price = round(info['price'], 2)
     lang = get_user_language(user_id) or 'en'
     TgConfig.STATE[user_id] = None
     TgConfig.STATE[f'{user_id}_pending_item'] = item_name
@@ -355,15 +352,6 @@ async def buy_item_callback_handler(call: CallbackQuery):
             new_balance = buy_item_for_balance(user_id, item_price)
             purchase_id = add_bought_item(value_data['item_name'], value_data['value'], item_price, user_id, formatted_time)
             purchases = purchases_before + 1
-            level_before, _, _, _ = get_level_info(purchases_before)
-            level_after, discount, _, _ = get_level_info(purchases)
-            if level_after != level_before:
-                msg_text = (
-                    f"🎉 Congratulations! You reached {level_after} and received a {discount:.1f}% discount for future purchases.\n\n"
-                    f"🎉 Поздравляем! Вы достигли уровня {level_after} и получили скидку {discount:.1f}% на все будущие покупки.\n\n"
-                    f"🎉 Sveikiname! Pasiekėte {level_after} ir gavote {discount:.1f}% nuolaidą visiems būsimiesiems pirkiniams."
-                )
-                await bot.send_message(user_id, msg_text)
 
             username = (
                 f'@{call.from_user.username}'
@@ -760,12 +748,16 @@ async def cancel_payment(call: CallbackQuery):
     invoice_id = call.data.split('_', 1)[1]
     lang = get_user_language(user_id) or 'en'
     if get_unfinished_operation(invoice_id):
-        await bot.edit_message_text(
-            'Are you sure you want to cancel payment?',
+        prompt = 'Are you sure you want to cancel payment?'
+        kwargs = dict(
             chat_id=call.message.chat.id,
             message_id=call.message.message_id,
             reply_markup=confirm_cancel(invoice_id, lang),
         )
+        if call.message.text:
+            await bot.edit_message_text(prompt, **kwargs)
+        else:
+            await bot.edit_message_caption(caption=prompt, **kwargs)
     else:
         await call.answer(text='❌ Invoice not found')
 
@@ -782,11 +774,18 @@ async def confirm_cancel_payment(call: CallbackQuery):
         purchases = select_user_items(user_id)
         markup = main_menu(role, TgConfig.CHANNEL_URL, TgConfig.PRICE_LIST_URL, lang)
         text = build_menu_text(call.from_user, balance, purchases, lang)
-        await bot.edit_message_text(
-            t(lang, 'invoice_cancelled'),
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
-        )
+        if call.message.text:
+            await bot.edit_message_text(
+                t(lang, 'invoice_cancelled'),
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+            )
+        else:
+            await bot.edit_message_caption(
+                caption=t(lang, 'invoice_cancelled'),
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+            )
         await bot.send_message(user_id, text, reply_markup=markup)
     else:
         await call.answer(text='❌ Invoice not found')

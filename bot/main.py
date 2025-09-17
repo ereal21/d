@@ -23,7 +23,10 @@ async def __on_start_up(dp: Dispatcher) -> None:
 
     if owner_id:
         try:
-            await dp.bot.send_message(owner_id, "✅ Viskas turetu veikt be problemu pagal viska, nes sita tik parodo kai viska sutikrina, sekmes <3")
+            await dp.bot.send_message(
+                owner_id,
+                "✅ Viskas turetu veikt be problemu pagal viska, nes sita tik parodo kai viska sutikrina, sekmes ❤️",
+            )
         except Exception as e:
             logger.error("Startup ping to OWNER_ID=%s failed: %s", owner_id, e)
     else:
