@@ -5,10 +5,8 @@ from typing import Final
 class TgConfig(ABC):
     STATE: Final = {}
     BASKETS: Final = {}
-    BLACKJACK_STATS: Final = {}
-    CHANNEL_URL: Final = 'https://t.me/+iXbi98gT0v5lOTNk'
+    CHANNEL_URL: Final = 'https://t.me/kepykla'
     HELPER_URL: Final = '@Karunele'
-    REVIEWS_URL: Final = 'https://t.me/+-yPLEiJwp-IxYzlk'
     PRICE_LIST_URL: Final = 'https://t.me/+iXbi98gT0v5lOTNk'
     GROUP_ID: Final = -988765433
     REFERRAL_PERCENT = 5

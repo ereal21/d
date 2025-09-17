@@ -34,6 +34,14 @@ def select_max_role_id() -> int:
     return Database().session.query(func.max(Role.id)).scalar()
 
 
+def get_role_id_by_name(role_name: str) -> int | None:
+    """Return the role ID for a given role name or None if missing."""
+    result = (Database().session.query(Role.id)
+              .filter(Role.name == role_name)
+              .first())
+    return result[0] if result else None
+
+
 def select_today_users(date: str) -> int | None:
     try:
         date_obj = datetime.datetime.strptime(date, "%Y-%m-%d").date()
