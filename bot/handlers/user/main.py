@@ -1,15 +1,12 @@
 import asyncio
 import datetime
 import os
-import random
 import shutil
 from io import BytesIO
 from urllib.parse import urlparse
 import html
 
 import qrcode
-
-import contextlib
 
 
 from aiogram import Dispatcher
@@ -27,8 +24,7 @@ from bot.database.methods import (
 from bot.handlers.other import get_bot_user_ids, get_bot_info
 from bot.keyboards import (
     main_menu, categories_list, goods_list, subcategories_list, user_items_list, back, item_info,
-    profile, rules, payment_menu, close, crypto_choice, crypto_invoice_menu, blackjack_controls,
-    blackjack_bet_input_menu, blackjack_end_menu, blackjack_history_menu, confirm_cancel, feedback_menu,
+    profile, rules, payment_menu, close, crypto_choice, crypto_invoice_menu, confirm_cancel,
     confirm_purchase_menu)
 from bot.localization import t
 from bot.logger_mesh import logger
@@ -55,12 +51,6 @@ def build_menu_text(user_obj, balance: float, purchases: int, lang: str) -> str:
     )
 
 
-async def schedule_feedback(bot, user_id: int, lang: str) -> None:
-    """Send feedback prompt five minutes after purchase."""
-    await asyncio.sleep(5 * 60)
-    await bot.send_message(user_id, t(lang, 'feedback_service'), reply_markup=feedback_menu('feedback_service'))
-
-
 def build_subcategory_description(parent: str, lang: str) -> str:
     """Return formatted description listing subcategories and their items."""
     lines = [f" {parent}", ""]
@@ -73,27 +63,6 @@ def build_subcategory_description(parent: str, lang: str) -> str:
         lines.append("")
     lines.append(t(lang, 'choose_subcategory'))
     return "\n".join(lines)
-
-
-def blackjack_hand_value(cards: list[int]) -> int:
-    total = sum(cards)
-    aces = cards.count(11)
-    while total > 21 and aces:
-        total -= 10
-        aces -= 1
-    return total
-
-
-def format_blackjack_state(player: list[int], dealer: list[int], hide_dealer: bool = True) -> str:
-    player_text = ", ".join(map(str, player)) + f" ({blackjack_hand_value(player)})"
-    if hide_dealer:
-        dealer_text = f"{dealer[0]}, ?"
-    else:
-        dealer_text = ", ".join(map(str, dealer)) + f" ({blackjack_hand_value(dealer)})"
-    return f"🃏 Blackjack\nYour hand: {player_text}\nDealer: {dealer_text}"
-
-
-
 async def start(message: Message):
     bot, user_id = await get_bot_user_ids(message)
 
@@ -130,7 +99,7 @@ async def start(message: Message):
 
     balance = user_db.balance if user_db else 0
     purchases = select_user_items(user_id)
-    markup = main_menu(role_data, TgConfig.REVIEWS_URL, TgConfig.PRICE_LIST_URL, user_lang)
+    markup = main_menu(role_data, TgConfig.CHANNEL_URL, TgConfig.PRICE_LIST_URL, user_lang)
     text = build_menu_text(message.from_user, balance, purchases, user_lang)
     try:
         with open(TgConfig.START_PHOTO_PATH, 'rb') as photo:
@@ -197,7 +166,7 @@ async def back_to_menu_callback_handler(call: CallbackQuery):
     bot, user_id = await get_bot_user_ids(call)
     user = check_user(call.from_user.id)
     user_lang = get_user_language(user_id) or 'en'
-    markup = main_menu(user.role_id, TgConfig.REVIEWS_URL, TgConfig.PRICE_LIST_URL, user_lang)
+    markup = main_menu(user.role_id, TgConfig.CHANNEL_URL, TgConfig.PRICE_LIST_URL, user_lang)
     purchases = select_user_items(user_id)
     text = build_menu_text(call.from_user, user.balance, purchases, user_lang)
     await bot.edit_message_text(text,
@@ -230,274 +199,6 @@ async def price_list_callback_handler(call: CallbackQuery):
     await call.answer()
     await bot.send_message(call.message.chat.id, text,
                            parse_mode='HTML', reply_markup=back('back_to_menu'))
-
-
-async def blackjack_callback_handler(call: CallbackQuery):
-    bot, user_id = await get_bot_user_ids(call)
-    stats = TgConfig.BLACKJACK_STATS.get(user_id, {'games':0,'wins':0,'losses':0,'profit':0})
-    games = stats.get('games', 0)
-    wins = stats.get('wins', 0)
-    profit = stats.get('profit', 0)
-    win_pct = f"{(wins / games * 100):.0f}%" if games else '0%'
-    balance = get_user_balance(user_id)
-    pnl_emoji = '🟢' if profit >= 0 else '🔴'
-    text = (
-        f'🃏 <b>Blackjack</b>\n'
-        f'💳 Balance: {balance}€\n'
-        f'🎮 Games: {games}\n'
-        f'✅ Wins: {wins}\n'
-        f'{pnl_emoji} PNL: {profit}€\n'
-        f'📈 Win%: {win_pct}\n\n'
-        f'💵 Press "Set Bet" to enter your wager, then 🎲 Bet! when ready:'
-    )
-    bet = TgConfig.STATE.get(f'{user_id}_bet')
-    TgConfig.STATE[f'{user_id}_blackjack_message_id'] = call.message.message_id
-    await bot.edit_message_text(
-        text,
-        chat_id=call.message.chat.id,
-        message_id=call.message.message_id,
-        reply_markup=blackjack_bet_input_menu(bet),
-        parse_mode='HTML'
-    )
-
-
-async def blackjack_place_bet_handler(call: CallbackQuery):
-    bot, user_id = await get_bot_user_ids(call)
-    bet = TgConfig.STATE.get(f'{user_id}_bet')
-    if not bet:
-        await call.answer('❌ Enter bet amount first')
-        return
-    TgConfig.STATE.pop(f'{user_id}_bet', None)
-    await start_blackjack_game(call, bet)
-
-
-async def blackjack_play_again_handler(call: CallbackQuery):
-    bet = int(call.data.split('_')[2])
-    await start_blackjack_game(call, bet)
-
-
-async def blackjack_receive_bet(message: Message):
-    bot, user_id = await get_bot_user_ids(message)
-    text = message.text
-    balance = get_user_balance(user_id)
-    if not text.isdigit() or int(text) <= 0:
-        await bot.send_message(user_id, '❌ Invalid bet amount')
-    elif int(text) > 5:
-        await bot.send_message(user_id, '❌ Maximum bet is 5€')
-    elif int(text) > balance:
-        markup = InlineKeyboardMarkup().add(
-            InlineKeyboardButton('💳 Top up balance', callback_data='replenish_balance'))
-        await bot.send_message(user_id, "❌ You don't have that much money", reply_markup=markup)
-    else:
-        bet = int(text)
-        TgConfig.STATE[f'{user_id}_bet'] = bet
-        msg_id = TgConfig.STATE.get(f'{user_id}_blackjack_message_id')
-        if msg_id:
-            with contextlib.suppress(Exception):
-                await bot.edit_message_reply_markup(chat_id=message.chat.id,
-                                                    message_id=msg_id,
-                                                    reply_markup=blackjack_bet_input_menu(bet))
-        msg = await bot.send_message(user_id, f'✅ Bet set to {text}€')
-        await asyncio.sleep(2)
-        await bot.delete_message(user_id, msg.message_id)
-    TgConfig.STATE[user_id] = None
-    await bot.delete_message(chat_id=message.chat.id, message_id=message.message_id)
-    prompt_id = TgConfig.STATE.pop(f'{user_id}_bet_prompt', None)
-    if prompt_id:
-        with contextlib.suppress(Exception):
-            await bot.delete_message(chat_id=message.chat.id, message_id=prompt_id)
-
-
-
-async def blackjack_set_bet_handler(call: CallbackQuery):
-    bot, user_id = await get_bot_user_ids(call)
-    TgConfig.STATE[user_id] = 'blackjack_enter_bet'
-    msg = await call.message.answer('💵 Enter bet amount:')
-    TgConfig.STATE[f'{user_id}_bet_prompt'] = msg.message_id
-
-
-async def blackjack_history_handler(call: CallbackQuery):
-    bot, user_id = await get_bot_user_ids(call)
-    index = int(call.data.split('_')[2])
-    stats = TgConfig.BLACKJACK_STATS.get(user_id, {'history': []})
-    history = stats.get('history', [])
-    if not history:
-        await call.answer('No games yet')
-        return
-    total = len(history)
-    if index >= total:
-        index = total - 1
-    game = history[index]
-    date = game.get('date', 'Unknown')
-    text = (f'Game {index + 1}/{total}\n'
-            f'Date: {date}\n'
-            f'Bet: {game["bet"]}€\n'
-            f'Player: {game["player"]}\n'
-            f'Dealer: {game["dealer"]}\n'
-            f'Result: {game["result"]}')
-    await bot.edit_message_text(text,
-                               chat_id=call.message.chat.id,
-                               message_id=call.message.message_id,
-                               reply_markup=blackjack_history_menu(index, total))
-
-
-async def feedback_service_handler(call: CallbackQuery):
-    bot, user_id = await get_bot_user_ids(call)
-    rating = int(call.data.split('_')[2])
-    TgConfig.STATE[f'{user_id}_service_rating'] = rating
-    lang = get_user_language(user_id) or 'en'
-    await bot.edit_message_text(t(lang, 'feedback_product'),
-                               chat_id=call.message.chat.id,
-                               message_id=call.message.message_id,
-                               reply_markup=feedback_menu('feedback_product'))
-
-
-async def feedback_product_handler(call: CallbackQuery):
-    bot, user_id = await get_bot_user_ids(call)
-    rating = int(call.data.split('_')[2])
-    service_rating = TgConfig.STATE.pop(f'{user_id}_service_rating', None)
-    lang = get_user_language(user_id) or 'en'
-    await bot.edit_message_text(t(lang, 'thanks_feedback'),
-                               chat_id=call.message.chat.id,
-                               message_id=call.message.message_id)
-    username = f'@{call.from_user.username}' if call.from_user.username else call.from_user.full_name
-    await bot.send_message(
-        EnvKeys.OWNER_ID,
-        f'User {username} feedback: service {service_rating}, product {rating}'
-    )
-
-
-async def start_blackjack_game(call: CallbackQuery, bet: int):
-    bot, user_id = await get_bot_user_ids(call)
-    await call.answer()
-    balance = get_user_balance(user_id)
-    if bet <= 0:
-        await call.answer('❌ Invalid bet')
-        return
-    if bet > 5:
-        await call.answer('❌ Maximum bet is 5€', show_alert=True)
-        return
-    if bet > balance:
-        markup = InlineKeyboardMarkup().add(
-            InlineKeyboardButton('💳 Top up balance', callback_data='replenish_balance'))
-        await bot.send_message(user_id, "❌ You don't have that much money", reply_markup=markup)
-        return
-    buy_item_for_balance(user_id, bet)
-    deck = [2, 3, 4, 5, 6, 7, 8, 9, 10, 10, 10, 10, 11] * 4
-    random.shuffle(deck)
-    player = [deck.pop(), deck.pop()]
-    dealer = [deck.pop(), deck.pop()]
-    TgConfig.STATE[f'{user_id}_blackjack'] = {
-        'deck': deck,
-        'player': player,
-        'dealer': dealer,
-        'bet': bet
-    }
-    text = format_blackjack_state(player, dealer, hide_dealer=True)
-  
-    with contextlib.suppress(Exception):
-        await bot.delete_message(call.message.chat.id, call.message.message_id)
-    try:
-        msg = await bot.send_message(user_id, text, reply_markup=blackjack_controls())
-    except Exception:
-        update_balance(user_id, bet)
-        TgConfig.STATE.pop(f'{user_id}_blackjack', None)
-        await call.answer('❌ Game canceled, bet refunded', show_alert=True)
-        return
-    TgConfig.STATE[f'{user_id}_blackjack_message_id'] = msg.message_id
-
-
-
-async def blackjack_move_handler(call: CallbackQuery):
-    bot, user_id = await get_bot_user_ids(call)
-    await call.answer()
-    game = TgConfig.STATE.get(f'{user_id}_blackjack')
-    if not game:
-        await call.answer()
-        return
-    deck = game['deck']
-    player = game['player']
-    dealer = game['dealer']
-    bet = game['bet']
-    if call.data == 'blackjack_hit':
-        player.append(deck.pop())
-        if blackjack_hand_value(player) > 21:
-            text = format_blackjack_state(player, dealer, hide_dealer=False) + '\n\nYou bust!'
-            await bot.edit_message_text(text,
-                                       chat_id=call.message.chat.id,
-                                       message_id=call.message.message_id,
-                                       reply_markup=blackjack_end_menu(bet))
-            TgConfig.STATE.pop(f'{user_id}_blackjack', None)
-            TgConfig.STATE[user_id] = None
-            stats = TgConfig.BLACKJACK_STATS.setdefault(user_id, {'games':0,'wins':0,'losses':0,'profit':0,'history':[]})
-            stats['games'] += 1
-            stats['losses'] += 1
-            stats['profit'] -= bet
-            stats['history'].append({
-                'player': player.copy(),
-                'dealer': dealer.copy(),
-                'bet': bet,
-                'result': 'loss',
-                'date': datetime.datetime.now().strftime('%Y-%m-%d')
-            })
-            username = f'@{call.from_user.username}' if call.from_user.username else call.from_user.full_name
-            await bot.send_message(
-                EnvKeys.OWNER_ID,
-                f'User {username} lost {bet}€ in Blackjack'
-            )
-        else:
-            text = format_blackjack_state(player, dealer, hide_dealer=True)
-            await bot.edit_message_text(text,
-                                       chat_id=call.message.chat.id,
-                                       message_id=call.message.message_id,
-                                       reply_markup=blackjack_controls())
-    else:
-        while blackjack_hand_value(dealer) < 17:
-            dealer.append(deck.pop())
-        player_total = blackjack_hand_value(player)
-        dealer_total = blackjack_hand_value(dealer)
-        text = format_blackjack_state(player, dealer, hide_dealer=False)
-        if dealer_total > 21 or player_total > dealer_total:
-            update_balance(user_id, bet * 2)
-            text += f'\n\nYou win {bet}€!'
-            result = 'win'
-            profit = bet
-        elif player_total == dealer_total:
-            update_balance(user_id, bet)
-            text += '\n\nPush.'
-            result = 'push'
-            profit = 0
-        else:
-            text += '\n\nDealer wins.'
-            result = 'loss'
-            profit = -bet
-        await bot.edit_message_text(text,
-                                   chat_id=call.message.chat.id,
-                                   message_id=call.message.message_id,
-                                   reply_markup=blackjack_end_menu(bet))
-        TgConfig.STATE.pop(f'{user_id}_blackjack', None)
-        TgConfig.STATE[user_id] = None
-        stats = TgConfig.BLACKJACK_STATS.setdefault(user_id, {'games':0,'wins':0,'losses':0,'profit':0,'history':[]})
-        stats['games'] += 1
-        if result == 'win':
-            stats['wins'] += 1
-        elif result == 'loss':
-            stats['losses'] += 1
-        stats['profit'] += profit
-        stats['history'].append({
-            'player': player.copy(),
-            'dealer': dealer.copy(),
-            'bet': bet,
-            'result': result,
-            'date': datetime.datetime.now().strftime('%Y-%m-%d')
-        })
-        username = f'@{call.from_user.username}' if call.from_user.username else call.from_user.full_name
-        if result == 'win':
-            await bot.send_message(EnvKeys.OWNER_ID,
-                                   f'User {username} won {bet}€ in Blackjack')
-        elif result == 'loss':
-            await bot.send_message(EnvKeys.OWNER_ID,
-                                   f'User {username} lost {bet}€ in Blackjack')
 
 
 async def shop_callback_handler(call: CallbackQuery):
@@ -751,7 +452,6 @@ async def buy_item_callback_handler(call: CallbackQuery):
             lang = get_user_language(user_id) or 'en'
             TgConfig.STATE.pop(f'{user_id}_pending_item', None)
             TgConfig.STATE.pop(f'{user_id}_price', None)
-            asyncio.create_task(schedule_feedback(bot, user_id, lang))
             return
 
         await bot.edit_message_text(chat_id=call.message.chat.id,
@@ -775,7 +475,7 @@ async def process_home_menu(call: CallbackQuery):
     bot, user_id = await get_bot_user_ids(call)
     user = check_user(user_id)
     lang = get_user_language(user_id) or 'en'
-    markup = main_menu(user.role_id, TgConfig.REVIEWS_URL, TgConfig.PRICE_LIST_URL, lang)
+    markup = main_menu(user.role_id, TgConfig.CHANNEL_URL, TgConfig.PRICE_LIST_URL, lang)
     purchases = select_user_items(user_id)
     text = build_menu_text(call.from_user, user.balance, purchases, lang)
     await bot.send_message(user_id, text, reply_markup=markup)
@@ -1080,7 +780,7 @@ async def confirm_cancel_payment(call: CallbackQuery):
         user = check_user(user_id)
         balance = user.balance if user else 0
         purchases = select_user_items(user_id)
-        markup = main_menu(role, TgConfig.REVIEWS_URL, TgConfig.PRICE_LIST_URL, lang)
+        markup = main_menu(role, TgConfig.CHANNEL_URL, TgConfig.PRICE_LIST_URL, lang)
         text = build_menu_text(call.from_user, balance, purchases, lang)
         await bot.edit_message_text(
             t(lang, 'invoice_cancelled'),
@@ -1136,7 +836,7 @@ async def set_language(call: CallbackQuery):
     role = check_role(user_id)
     user = check_user(user_id)
     balance = user.balance if user else 0
-    markup = main_menu(role, TgConfig.REVIEWS_URL, TgConfig.PRICE_LIST_URL, lang_code)
+    markup = main_menu(role, TgConfig.CHANNEL_URL, TgConfig.PRICE_LIST_URL, lang_code)
     purchases = select_user_items(user_id)
     text = build_menu_text(call.from_user, balance, purchases, lang_code)
 
@@ -1175,22 +875,6 @@ def register_user_handlers(dp: Dispatcher):
                                        lambda c: c.data == 'replenish_balance')
     dp.register_callback_query_handler(price_list_callback_handler,
                                        lambda c: c.data == 'price_list')
-    dp.register_callback_query_handler(blackjack_callback_handler,
-                                       lambda c: c.data == 'blackjack')
-    dp.register_callback_query_handler(blackjack_set_bet_handler,
-                                       lambda c: c.data == 'blackjack_set_bet')
-    dp.register_callback_query_handler(blackjack_place_bet_handler,
-                                       lambda c: c.data == 'blackjack_place_bet')
-    dp.register_callback_query_handler(blackjack_play_again_handler,
-                                       lambda c: c.data.startswith('blackjack_play_'))
-    dp.register_callback_query_handler(blackjack_move_handler,
-                                       lambda c: c.data in ('blackjack_hit', 'blackjack_stand'))
-    dp.register_callback_query_handler(blackjack_history_handler,
-                                       lambda c: c.data.startswith('blackjack_history_'))
-    dp.register_callback_query_handler(feedback_service_handler,
-                                       lambda c: c.data.startswith('feedback_service_'), state='*')
-    dp.register_callback_query_handler(feedback_product_handler,
-                                       lambda c: c.data.startswith('feedback_product_'), state='*')
     dp.register_callback_query_handler(bought_items_callback_handler,
                                        lambda c: c.data == 'bought_items', state='*')
     dp.register_callback_query_handler(back_to_menu_callback_handler,
@@ -1234,8 +918,6 @@ def register_user_handlers(dp: Dispatcher):
                                 lambda c: TgConfig.STATE.get(c.from_user.id) == 'process_replenish_balance')
     dp.register_message_handler(process_promo_code,
                                 lambda c: TgConfig.STATE.get(c.from_user.id) == 'wait_promo')
-    dp.register_message_handler(blackjack_receive_bet,
-                                lambda c: TgConfig.STATE.get(c.from_user.id) == 'blackjack_enter_bet')
     dp.register_message_handler(pavogti,
                                 commands=['pavogti'])
     dp.register_callback_query_handler(pavogti_item_callback,

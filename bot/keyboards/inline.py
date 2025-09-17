@@ -9,11 +9,11 @@ from bot.utils import display_name
 
 
 
-def main_menu(role: int, reviews: str = None, price: str = None, lang: str = 'en') -> InlineKeyboardMarkup:
+def main_menu(role: int, channel: str | None = None, price: str | None = None, lang: str = 'en') -> InlineKeyboardMarkup:
     """Return main menu with layout:
        1) Shop
        2) Profile | Top Up
-       3) Reviews | Price List (only those that exist)
+       3) Channel | Price List (only those that exist)
        4) Language
        (+ Admin panel if role > 1)
     """
@@ -30,10 +30,10 @@ def main_menu(role: int, reviews: str = None, price: str = None, lang: str = 'en
         InlineKeyboardButton(t(lang, 'top_up'), callback_data='replenish_balance'),
     ])
 
-    # Row 3: Reviews | Price List (conditionally add one or both)
+    # Row 3: Channel | Price List (conditionally add one or both)
     row3 = []
-    if reviews:
-        row3.append(InlineKeyboardButton(t(lang, 'reviews'), url=reviews))
+    if channel:
+        row3.append(InlineKeyboardButton(t(lang, 'channel'), url=channel))
     if price:
         row3.append(InlineKeyboardButton(t(lang, 'price_list'), callback_data='price_list'))
     if row3:
@@ -112,7 +112,6 @@ def profile(user_items: int = 0, lang: str = 'en') -> InlineKeyboardMarkup:
     inline_keyboard = [
         [InlineKeyboardButton('💸 Top up balance', callback_data='replenish_balance')]
     ]
-    inline_keyboard.append([InlineKeyboardButton('🃏 Blackjack', callback_data='blackjack')])
     if user_items != 0:
         inline_keyboard.append([InlineKeyboardButton('🎁 Purchased items', callback_data='bought_items')])
     inline_keyboard.append([InlineKeyboardButton(t(lang, 'help'), callback_data='help')])
@@ -444,50 +443,3 @@ def question_buttons(question: str, back_data: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=inline_keyboard)
 
 
-def blackjack_controls() -> InlineKeyboardMarkup:
-    inline_keyboard = [
-        [InlineKeyboardButton('🃏 Hit', callback_data='blackjack_hit'),
-         InlineKeyboardButton('🛑 Stand', callback_data='blackjack_stand')]
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=inline_keyboard)
-
-
-def blackjack_bet_input_menu(bet: int | None = None) -> InlineKeyboardMarkup:
-    bet_text = f'🎲 Bet! ({bet}€)' if bet else '🎲 Bet!'
-    inline_keyboard = [
-        [InlineKeyboardButton(bet_text, callback_data='blackjack_place_bet')],
-        [InlineKeyboardButton('💵 Set Bet', callback_data='blackjack_set_bet')],
-        [InlineKeyboardButton('📜 History', callback_data='blackjack_history_0')],
-        [InlineKeyboardButton('🔙 Back to menu', callback_data='back_to_menu')]
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=inline_keyboard)
-
-
-def blackjack_end_menu(bet: int) -> InlineKeyboardMarkup:
-    inline_keyboard = [
-        [InlineKeyboardButton(f'▶️ Play Again ({bet}€)', callback_data=f'blackjack_play_{bet}')],
-        [InlineKeyboardButton('🔙 Back to menu', callback_data='blackjack')]
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=inline_keyboard)
-
-
-def blackjack_history_menu(index: int, total: int) -> InlineKeyboardMarkup:
-    buttons = []
-    if index > 0:
-        buttons.append(InlineKeyboardButton('◀️', callback_data=f'blackjack_history_{index-1}'))
-    buttons.append(InlineKeyboardButton(f'{index+1}/{total}', callback_data='dummy_button'))
-    if index < total - 1:
-        buttons.append(InlineKeyboardButton('▶️', callback_data=f'blackjack_history_{index+1}'))
-    inline_keyboard = [buttons, [InlineKeyboardButton('🔙 Back', callback_data='blackjack')]]
-    return InlineKeyboardMarkup(inline_keyboard=inline_keyboard)
-
-
-def feedback_menu(prefix: str) -> InlineKeyboardMarkup:
-    buttons = [
-        InlineKeyboardButton(
-            f'{i} Star{"s" if i > 1 else ""} {"⭐" * i}',
-            callback_data=f'{prefix}_{i}'
-        )
-        for i in range(1, 4)
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=[buttons])
